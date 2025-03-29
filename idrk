@@ -1,0 +1,1121 @@
+/*global Phaser*/
+
+var game = new Phaser.Game(window.innerWidth, window.innerHeight, Phaser.AUTO, 'game', { preload: preload, create: create, update: update, render: render });
+game.desiredFps = 60;
+game.forceSingleUpdate = false;
+
+var WebFontConfig = {
+	google: {
+		families: ['Passion One']
+	}
+};
+
+
+function render() {
+	const offset = minimap.isVisible() ? 160 : 0;
+	if (credentials?.graphics?.fpsCounter) {
+		game.debug.text(`FPS: ${game.time.fps}`, 20, 140 + offset);
+		if (state == 'game') {
+			game.debug.text(`Ping: ${ping}`, 20, 160 + offset);
+		}
+	}
+}
+
+function getCameraScale() {
+	if (window.state == 'title') return 1;
+
+	const baseScale = 2150;
+	const width = window.innerWidth;
+	const height = window.innerHeight;
+	const diagonalLength = Math.sqrt((width ** 2) + (height ** 2));
+	return Number((diagonalLength / baseScale).toFixed(2));
+}
+
+function setCameraScale(scale) {
+	SCALE = scale;
+	game.camera.scale.set(SCALE);
+}
+
+
+var SCALE = 1;
+var NUM_GAMES_PLAYED = 0;
+
+var FLAGS = {
+	PAGE_LOADED: false,
+	ACCOUNT_LOADED: false,
+	VIDEO_AD_SHOWN: Date.now(),
+	NO_RECORD: false
+}
+
+init();
+
+
+
+var usedServerLink = false;
+var GAMES = {};
+var MODE = null;
+
+var GLOBAL_ITEM_MANAGER = [
+	//["arm/0","kevdude"]
+];
+
+var GLOBAL_FILE_MANAGER = {
+	//"arm/0":true
+};
+
+if (document.getElementById('sDPJKoQbLpAX')) {
+	FLAGS.ADBLOCK = false;
+}
+else {
+	FLAGS.ADBLOCK = true;
+}
+
+var LOBBY_SOCKET = false;
+var FIRST_LOBBY_CONNECTION = true;
+
+if (window.location.search.length > 3 && window.location.search.length < 8) {
+	document.getElementById("connecting").style.display = "block";
+	document.getElementById("connectingText").innerText = "Loading Resources...";
+}
+
+getRegion(loadPage);
+
+function pingLobby() {
+	if (window.state != "game") {
+		getFromServer("/lobby", function(data) {
+			GAMES = data.games;
+			fillGameList(GAMES);
+			updateFriendActivity(GAMES);
+		});
+	}
+}
+
+function loadPage() {
+	console.log("Loading Page...");
+	document.getElementById("loading").style.display = "none";
+	document.getElementById("titleScreen").style.display = "block";
+	if (!credentials.guest) {
+		setupAccountInfo();
+		loadAccountInfo();
+	}
+	else{
+		loadNewPlayerContent();
+	}
+	if (FLAGS.PAGE_LOADED) {
+		start_title();
+	}
+	pingLobby();
+	
+	// Intervals: ping lobby every 2.5 seconds, reload callout every 30 seconds,
+	// and refresh missions/events every minute.
+	setInterval(pingLobby, 2500);
+	setInterval(loadCallout, 30000);
+	setInterval(refetchMissionsAndEvents, 60000);
+}
+
+function updateWorld(msg, strict) {
+	for (var i in msg.tanks) {
+		if (server_tanks[i] !== undefined) {
+			if (SERVER_MATCH_DATA.elimination) {
+				if (server_tanks[i].body && server_tanks[i].body.alpha !== server_tanks[i].teamBoardAlpha) {
+					var a = server_tanks[i].teamBoardAlpha = server_tanks[i].body.alpha;
+					var teamBoardAlpha = a == 0 ? .75 : 1;
+					var target = document.getElementById("teamBoardEntry_" + i);
+					target.style.opacity = teamBoardAlpha;
+					updateTanksAliveCount();
+				}
+			}
+
+			if (server_tanks[i].body.alpha * 2 != msg.tanks[i].o) {
+				setTankAlpha(server_tanks[i], msg.tanks[i].o / 2);
+			}
+
+			if (i != name) {
+				server_tanks[i].targetAngle = msg.tanks[i].a;
+			}
+			
+			server_tanks[i].vX = msg.tanks[i].vX;
+			server_tanks[i].vY = msg.tanks[i].vY;
+
+
+		}
+		else if (tanksUnderConstruction.indexOf(i) === -1) {
+			console.log("TANK INFO DROPPED FOR " + i + ". RE-REQUESTING...");
+			server_tanks[i] = {};
+
+			socket.send("tank info", { usernameRequest: i });
+		}
+	}
+	for (var i in server_tanks) {
+		if (server_tanks[i]?.tracer) backToTitle(); // "tracer" attribute on a server tank is a cheat
+		if (msg.tanks[i] === undefined && msg.c !== Infinity) {
+			if (server_tanks[i].disconnectCount === undefined) {
+				server_tanks[i].disconnectCount = 1;
+			}
+			else {
+				server_tanks[i].disconnectCount += 1;
+			}
+			if ((server_tanks[i].disconnectCount >= 10 || strict) && (i !== name || FLAGS.dynamicSpectate)) { //only disconnect a player if they have not been in the server data for ten times in a row AND if it's not you
+				removePlayerFromTeamBoard(i);
+				destroyTankSprite(i);
+				updateLeaderboard();
+				sortTeamBoard("b");
+				sortTeamBoard("r");
+			}
+		}
+	}
+}
+
+function init() {
+	FLAGS.dynamicSpectate = false;
+	mobileData = null;
+	AFK = new Date().getTime();
+	controlPoint = undefined;
+	sniperAim = undefined;
+	ROOF_RANGE = 100;
+	xpInfo = {};
+	clockString = "--:--";
+	gameEnded = false;
+	lastTime = Infinity;
+	afk_counter = 0;
+	CURRENTBULLETID = -1;
+	consoleEnabled = false;
+	consoleHidden = false;
+	consoleExpanded = false;
+	chatEnabled = false;
+	tankdisabled = false;
+	receivedPong = true;
+	ping = 30;
+	TANK_SPEED = 4;
+	ARM_SIZE = 0.35;
+	bullets = [];
+	hazards = [];
+	captureFlags = [];
+	power_ups = [];
+	WORLD_PADDING = Math.max(getGameWidth(), getGameHeight());
+	CAMERA_MOVEMENT = .5;
+	SNIPER_VIEW_TRANSITION = 0;
+	count = 0;
+	server_tanks = {};
+	skins = {};
+	latestUpdate = { c: Infinity, tanks: {} };
+	tempTime = 0;
+	teamBoardDisplayed = false;
+	spectating = true;
+	weaponSelected = 0;
+	weaponsList = ["regular", "grenade", "flashbang", "rapid", "bomb", "shotgun", "rocket", "sniper", "minigun", "bottlebomb"];
+}
+
+var SOUNDS = {
+
+};
+
+function preload() {
+	// Loads the bare minimum needed for the title screen
+	console.log("PRELOAD FUNCTION STARTED");
+	game.load.onLoadStart.add(function() { console.log("START LOAD - " + new Date().getTime()) });
+	game.load.onLoadComplete.addOnce(finishCreate, this);
+	game.load.script('webfont', '//ajax.googleapis.com/ajax/libs/webfont/1.4.7/webfont.js');
+	game.load.image('body b', 'assets/Tank Body.png');
+	game.load.image('body_dark', 'assets/darkMode/Tank Body.png');
+	game.load.image("body r", "assets/Tank Body Red.png");
+	game.load.image("body grey", "assets/Tank Body Grey.png");
+
+
+	game.load.image('arm/0', 'assets/items/arm/0.png');
+	game.load.image('sticker/0', 'assets/items/sticker/0.png');
+	game.load.image('decal/0', 'assets/items/decal/0.png');
+
+	game.load.image("titleTile", "assets/titleTile.png");
+	game.load.image("backgroundDark", "assets/background dark.png");
+	game.load.image('backgroundDark_original', 'assets/background dark_original.png');
+	game.load.image("background", "assets/background.png");
+	game.load.image('background_original', 'assets/background_original.png');
+	game.time.advancedTiming = true;
+}
+
+function lazyLoadGameResources(){
+	game.load.onLoadComplete.addOnce(function(){
+		console.log("Finished loading all resources");
+		FLAGS.RESOURCES_LOADED = true;
+		if(FLAGS.RESOURCE_LOAD_CALLBACK){
+			FLAGS.RESOURCE_LOAD_CALLBACK();
+		}
+	}, this);
+	game.load.onFileComplete.add(fileComplete, this);
+
+	game.load.image("joystickInside", "assets/joystickInside.png");
+	game.load.image("joystickOutside", "assets/joystickOutside.png");
+
+	for (var i = 0; i < 6; i++) {
+		game.load.image("explosion/0/n_dark/" + i, "assets/items/explosion/0/n/darkMode/" + i + ".png");
+		game.load.image("explosion/0/n/" + i, "assets/items/explosion/0/n/" + i + ".png");
+	}
+	for (var i = 0; i < 6; i++) {
+		game.load.image("explosion/0/r/" + i, "assets/items/explosion/0/r/" + i + ".png");
+	}
+	for (var i = 0; i < 6; i++) {
+		game.load.image("explosion/0/b/" + i, "assets/items/explosion/0/b/" + i + ".png");
+	}
+
+
+	for (var i = 1; i <= 4; i++) {
+		game.load.image("smoke" + i, "assets/smoke/" + i + ".png");
+	}
+	for (var i = 1; i <= 4; i++) {
+		game.load.image("lightBurst" + i, "assets/lightBurst/" + i + ".png");
+	}
+	//Game Components
+	game.load.image('bullet', 'assets/' + 'bullet.png');
+	game.load.image('bullet_dark', 'assets/darkMode/' + 'bullet.png');
+	game.load.image('bullet r', "assets/bullet red.png");
+	game.load.image("bullet b", "assets/darkMode/" + "bullet blue.png");
+	game.load.image("bullet b_dark", "assets/" + "bullet blue.png");
+
+	game.load.image("bomb r_spooky", "assets/spooky/bomb r.png");
+	game.load.image("bomb b_spooky", "assets/spooky/bomb b.png");
+	game.load.image("bomb_spooky", "assets/spooky/bomb.png");
+	game.load.image("skull_dark", "assets/spooky/skull.png");
+
+	game.load.image("fullscreen", "assets/Fullscreen.png");
+
+	// Map Tiles
+	game.load.image("mapTile", "assets/mapTile.png");
+	game.load.image("mapTileSet", "assets/mapTileSet.png");
+	game.load.image("mapTile Blue", "assets/mapTile Blue.png");
+	game.load.image("mapTile Red", "assets/mapTile Red.png");
+	game.load.image("mapTile Blue Pale", "assets/mapTile Blue Pale.png");
+	game.load.image("mapTile Red Pale", "assets/mapTile Red Pale.png");
+	game.load.image("bulletOnlyTile", "assets/bulletOnlyTile.png");
+	game.load.image("ice", "assets/ice.png");
+	game.load.spritesheet("iceSparkles", "assets/iceSparkles.png", 25, 25);
+	game.load.image("bounce", "assets/bounce.png");
+
+	var mapSizes = [10, 11, 15, 20, 24, 25, 30, 31, 32, 33, 35, 40, 50, 51, 55];
+	for (var i = 0; i < mapSizes.length; i++) {
+		game.load.spritesheet('mapTile' + mapSizes[i], 'assets/tileColors' + mapSizes[i] + '.png', 1, 1, mapSizes[i]);
+	}
+
+	game.load.spritesheet("mapTile40_40", "assets/tileColors40_40.png", 1, 1);
+
+	game.load.spritesheet("mapTile48_48", "assets/tileColors48_48.png", 1, 1);
+
+	game.load.spritesheet("mapTile15_15", "assets/tileColors15_15.png", 1, 1);
+
+	//Powerups
+
+	for (var i = 0; i < weaponsList.length; i++) {
+		if (i != 0) {
+			game.load.image(weaponsList[i] + "_dark", "assets/powerups/darkMode/" + weaponsList[i] + ".png");
+			game.load.image(weaponsList[i], "assets/powerups/" + weaponsList[i] + ".png");
+		}
+	}
+
+
+
+
+	var projectiles = ["rocket", "flashbang", "grenade", "volcano", "bottlebomb"];
+	for (var i = 0; i < projectiles.length; i++) {
+		var p = projectiles[i];
+		game.load.image(p + 'Bullet', "assets/" + p + ".png");
+		game.load.image(p + 'Bullet_dark', "assets/darkMode/" + p + ".png");
+		game.load.image(p + 'Bullet r', "assets/" + p + " r.png");
+		game.load.image(p + "Bullet b", "assets/" + p + " b.png")
+		game.load.image(p + "Bullet b_dark", "assets/darkMode/" + p + " b.png")
+	}
+
+	game.load.image("sniperAim", "assets/sniper/aim.png");
+
+	game.load.spritesheet("sniperShoot_r", "assets/sniper/shoot_r.png", 20, 20, 5);
+	game.load.spritesheet("sniperShoot_b", "assets/sniper/shoot_b.png", 20, 20, 5);
+
+	game.load.image("crown", "assets/crown.png");
+
+	game.load.image("crown arrow", "assets/crown arrow.png");
+
+	game.load.image("bubble r_0", "assets/bubbles/r.png");
+	game.load.image("bubble b_0", "assets/bubbles/b.png");
+
+
+	game.load.image("cp_border", "assets/mode/cp/border.png");
+
+	game.load.image("cp_arrow", "assets/mode/cp/arrow.png");
+
+	game.load.image("cp_arrow r", "assets/mode/cp/arrow r.png");
+
+	game.load.image("cp_arrow b", "assets/mode/cp/arrow b.png");
+
+	game.load.image('ctf_flag b', '/assets/mode/ctf/blueFlag_tile.png');
+	game.load.image('ctf_flag r', '/assets/mode/ctf/redFlag_tile.png');
+
+	game.load.image('ctf_arrow', '/assets/mode/cp/arrow.png');
+	game.load.image('ctf_arrow b', '/assets/mode/cp/arrow b.png');
+	game.load.image('ctf_arrow r', '/assets/mode/cp/arrow r.png');
+
+	game.load.image('ctf_highlight b', '/assets/Tank Body.png');
+	game.load.image('ctf_highlight r', '/assets/Tank Body Red.png');
+
+	if (CHRISTMAS_TIME) {
+		game.load.image("christmas/presents/b/0", "assets/christmas/presents/b/0.png");
+		game.load.image("christmas/presents/r/0", "assets/christmas/presents/r/0.png");
+		game.load.image("c_lights", "assets/christmas/lights.png");
+		for (var i = 0; i <= 5; i++) {
+			game.load.image("snowflake_" + i, "assets/christmas/snow/" + i + ".png");
+		}
+	}
+	if (window.missions && !FLAGS.collectablesLoaded) {
+		FLAGS.collectablesLoaded = true;
+		console.log("LOADING COLLECTABLES FROM PRELOAD FUNCTION");
+		loadCollectables();
+	}
+
+
+	var soundKeys = "bullet1 bullet2 bullet3 explode explodeShort weapon sad sad2 beep beep2 zap flash happy jingle jingle2 spawn slide".split(" ");
+	for (var i = 0; i < soundKeys.length; i++) {
+		var key = soundKeys[i];
+		game.load.audio(key, "sounds/" + key + ".mp3");
+		SOUNDS[key] = new Phaser.Sound(game, key, 1);
+	}
+	SOUNDS.weapon.volume = 0.35;
+
+	SOUNDS.streaks = {
+		3: ["jingle_streak3", "Triple Kill!"],
+		5: ["jingle_carnage", "Total Carnage!!"],
+		10: ["jingle_unstoppable", "Unstoppable!!!"],
+		15: ["jingle_insanity", "Insanity!!!!"],
+		20: ["jingle_stop", "Maybe you should stop now..."],
+		25: ["jingle_takeabreak", "Seriously! Take a break or something."]
+	};
+
+	for (var i in SOUNDS.streaks) {
+		game.load.audio(SOUNDS.streaks[i][0], "sounds/jingles/" + SOUNDS.streaks[i][0] + ".mp3");
+		SOUNDS[SOUNDS.streaks[i][0]] = new Phaser.Sound(game, SOUNDS.streaks[i][0], .25);
+	}
+	game.load.start();
+}
+
+function loadCollectables() {
+	if (!globalThis.missions) return;
+
+	let loaded = false;
+	for (const key in missions) {
+		const mission = missions[key];
+
+		if (mission.requirements.method !== 'collect' || !missionActive(mission)) continue;
+
+		const imageKey = `c_${key}`;
+
+		// If this image has already loaded, skip it.
+		if (game.cache.checkImageKey(imageKey)) continue;
+
+		console.debug(`Loading collectable image: ${imageKey}`);
+
+		game.load.image(imageKey, `assets/eventFiles/${key}.png`);
+		loaded = true;
+	}
+	if (loaded) game.load.start();
+}
+
+function create() {
+	console.log("CREATE FUNCTION REACHED");
+}
+
+function fileComplete(progress, cacheKey, success, totalLoaded, totalFiles) {
+	if(FLAGS.PAGE_LOADED){
+		document.getElementById("connectingText").innerText = translate("serverLoading") + ": " + progress + "%";
+	}
+	GLOBAL_FILE_MANAGER[cacheKey] = Date.now();
+}
+
+function finishCreate() {
+	console.log("Initializing game");
+	game.load.onLoadComplete.removeAll();
+	document.getElementById("connectingText").innerText = "Initializing...";
+	document.getElementById("loadingBackground").style.opacity = "0";
+	bindControls();
+	game.renderer.renderSession.roundPixels = true;
+	setCameraScale(SCALE);
+	game.stage.backgroundColor = '#eeeeee';
+	state = "loading";
+	FLAGS.PAGE_LOADED = true;
+	setInterval(simpleSendPing, 5000);
+	start_title();
+	setTimeout(
+		lazyLoadGameResources
+	,1000);
+}
+
+function update() {
+	if (!FLAGS.PAGE_LOADED) { return; }
+	updateSmoke();
+	updateParticles(gameParticleList);
+	if (christmasTime() && FLAGS.RESOURCES_LOADED) {
+		updateSnow();
+	}
+	if (state == "game") {
+		update_game();
+	}
+	else if (state == "title") {
+		update_title();
+	}
+}
+
+function respawn_user(clientOnly, fromReplay=false) {
+	if (window.player?.isPlaying()) {
+		if (!fromReplay) {
+			// This is a UI interaction. Block it!
+			return;
+		}
+	}
+	window.recorder?.handleRespawn(clientOnly);
+
+	AFK = new Date().getTime();
+	tankdisabled = false;
+	if (clientOnly !== true) {
+		socket.send("respawn", {});
+	}
+	clearTimeout(SHOW_RESPAWN_UI_TIMEOUT);
+	playSound("spawn");
+	hide("respawn_screen");
+	hide("respawnAds");
+}
+
+function start_title() {
+	if (ChunkManager.mapIsLoaded) ChunkManager.unloadMap();
+	game.world.removeAll();
+	if (window.storm && storm.mask) {
+		game.world.mask = null;
+		storm.mask.clear();
+	}
+	game.world.pivot.set(0);
+	setCameraScale(1);
+	state = "title";
+	game.stage.backgroundColor = '#ffffff';
+	title_background = game.add.tileSprite(-58, -58, window.innerWidth * (window.devicePixelRatio > 1 ? window.devicePixelRatio : 1) + 58, window.innerHeight * (window.devicePixelRatio > 1 ? window.devicePixelRatio : 1) + 58, "background" + (darkModeEnabled() ? "Dark" : "") + '_original');
+	title_background.scale.set(1);
+	maze_background = game.add.sprite(0, 0, "titleTile");
+	maze_background.smoothed = false;
+	maze_background.scale.set(100);
+	if (darkModeEnabled()) {
+		maze_background.alpha = 0.5;
+	}
+	title_gradient = createGradient(getGameWidth(), getGameHeight());
+	if (spookyTime()) {
+		setSpookyTime(true);
+	}
+	profileTank = {};
+	loadTitleTank();
+	loadCallout();
+	initializeFriendSidebar();
+
+	// Check for CrazyGames match link on CrazyGames
+	let crazyGamesInvite = null;
+	if (globalThis.CrazyGames) {
+		const params = new URLSearchParams(window.location.search);
+		const matchId = params.get('matchId');
+		if (matchId) crazyGamesInvite = matchId;
+	}
+
+	const MEETS_LENGTH_REQ = (window.location.search.length > 3 && window.location.search.length < 8);
+	if ((MEETS_LENGTH_REQ || crazyGamesInvite) && !usedServerLink) {
+		usedServerLink = true;
+		FLAGS.privateMatchAcknowledged = true;
+		const matchID = crazyGamesInvite || window.location.search.slice(1);
+		const serverPrefix = matchID.charAt(0);
+		for (const i in serverPrefixes) {
+			if (serverPrefixes[i] == serverPrefix) {
+				initiateServerConnection(`${i}/${matchID.slice(1)}`);
+				return;
+			}
+		}
+		start_title();
+		throwError("Could not connect to match: invalid link.", true);
+		history.replaceState({}, "BlockTanks", "/");
+	}
+	else if (usedServerLink) {
+		const params = new URLSearchParams(window.location.search);
+		const eventID = params.get('event');
+		const allowedToViewCalendar = (!credentials.guest && !credentials.nameStatus?.shadowBan);
+		if (!eventID || !allowedToViewCalendar) {
+			history.replaceState({}, 'BlockTanks', '/');
+		}
+	}
+	usedServerLink = true;
+}
+
+function update_title() {
+	updateTitleTank();
+
+	// Don't move title background on large screens due to performance.
+	if (Math.max(window.innerHeight, window.innerWidth) >= 2500) return;
+
+	var dX = (getGameWidth() / 2 - cursorX) / getGameWidth() * 2;
+	var dY = (getGameHeight() / 2 - cursorY) / getGameHeight() * 2;
+	title_background.x -= dX;
+	title_background.y -= dY;
+	if (title_background.x <= -60) {
+		title_background.x = -1;
+	}
+	if (title_background.x >= 0) {
+		title_background.x = -59;
+	}
+	if (title_background.y <= -60) {
+		title_background.y = -1;
+	}
+	if (title_background.y >= 0) {
+		title_background.y = -59;
+	}
+	maze_background.x -= dX * 2.3;
+	maze_background.y -= dY * 2.3;
+	if (maze_background.x <= -5000 + getGameWidth()) {
+		maze_background.x = -2500 + getGameWidth();
+	}
+	else if (maze_background.x > 0) {
+		maze_background.x = -2500;
+	}
+	if (maze_background.y <= -5000 + getGameHeight()) {
+		maze_background.y = -2500 + getGameHeight();
+	}
+	else if (maze_background.y > 0) {
+		maze_background.y = -2500;
+	}
+}
+
+function start_game() {
+	init();
+
+	ROOF_RANGE = 200;
+	FLAGS.joined_game = false;
+	if (NUM_GAMES_PLAYED < 1) {
+		document.getElementById("console").innerHTML = "";
+	}
+	document.getElementById("redTeam").innerHTML = '';
+	document.getElementById("blueTeam").innerHTML = '';
+	document.getElementById("team").innerHTML = '';
+
+	// Hide player stats overlay
+	const stats = document.querySelector('#playerinfo');
+	stats.classList.replace('visible', 'hidden');
+	stats.removeAttribute('targetplayer');
+
+	updateTeamButtons();
+	latestUpdate = { c: Infinity, tanks: {} };
+
+	selectWeapon("regular");
+	document.getElementById("weapons").style.display = "block";
+	roof_spawns = map.roof_spawns;
+
+	for (var i = 0; i < weaponsList.length; i++) {
+		if (darkModeEnabled()) {
+			document.getElementById(weaponsList[i] + "-ammocount").parentNode.style.color = "#eeeeee";
+			document.getElementById(weaponsList[i] + "-powerupImage").src = "/assets/powerups/darkMode/" + weaponsList[i] + ".png";
+		}
+		else {
+			document.getElementById(weaponsList[i] + "-ammocount").parentNode.style.color = "#222222";
+			document.getElementById(weaponsList[i] + "-powerupImage").src = "/assets/powerups/" + weaponsList[i] + ".png";
+		}
+	}
+
+	if (darkModeEnabled()) {
+		document.getElementById("regular-ammocount-symbol").style.filter = "invert(100%)";
+	}
+	else {
+		document.getElementById("regular-ammocount-symbol").style.filter = "invert(0%)";
+	}
+
+	const reportButton = document.querySelector('#reportButton');
+	reportButton.style.display = credentials.guest ? 'none' : 'unset';
+
+	hide('helpMenu');
+	hide('weapons');
+	hide('unlockAnnouncement');
+	hide('respawnAds');
+	hide('respawn_screen');
+	hide('titleScreen');
+	hide('credentials');
+	hide("connecting");
+	hide("mapVote");
+	hide("tdmBoard");
+	hide("ffaBoard");
+	hide("trueMatchEnding");
+	hide("tanksAlive");
+	hideExperienceBreakdown();
+	hide('swapButton');
+	disableConsole();
+
+	displayShadow(true, true);
+	show("kill_screen");
+	show("gameOverlay");
+	show("teamButton");
+	show("teamButtonBlue");
+	show("teamButtonRed");
+	show("teamButtonAuto");
+
+	document.getElementById("clock").classList.remove('clockCountdown');
+
+	if (MODE !== "ffa") {
+		document.getElementById("tdmBoard").style.display = "block";
+		document.getElementById("bluekills_container").style.display = "block";
+		document.getElementById("redkills_container").style.display = "block";
+	}
+	else {
+		document.getElementById("bluekills_container").style.display = "none";
+		document.getElementById("redkills_container").style.display = "none";
+		document.getElementById("ffaBoard").style.display = "block";
+	}
+	document.getElementById("teamButtonSpectate").style.display = SERVER_MATCH_DATA.searchable ? "none" : "block";
+
+	showInitialStartMenu(3);
+
+	game.world.removeAll();
+	game.sound.stopAll();
+
+	game.world.setBounds(0, 0, WORLD_PADDING * 2 + map.map[0].length * 100, WORLD_PADDING * 2 + map.map.length * 100);
+
+	createBackground();
+
+	const start = window.performance.now();
+	ChunkManager.loadMap(map);
+	console.log(`Loading map took ${window.performance.now() - start}ms`);
+
+	document.getElementById("kill_screen").style.display = "block";
+
+	crown = {
+		crown: null
+	}
+
+	let roofTexture = new Phaser.BitmapData(game, 'roof', 100, 100);
+	roofTexture.ctx.fillStyle = 'rgb(35, 35, 35)';
+	roofTexture.ctx.fillRect(0, 0, 100, 100);
+	roofs = game.add.group();
+	roofs.destroy = () => {console.log(':(')}; // Prevent destroying the roofs group
+	if (!SERVER_MATCH_DATA.match_general_noRoofs) {
+		for (i = 0; i < roof_spawns.length; i++) {
+			new_roof = game.add.sprite(roof_spawns[i][0] + WORLD_PADDING, roof_spawns[i][1] + WORLD_PADDING, roofTexture);
+			new_roof.anchor.set(0.5);
+			new_roof.width = new_roof.height = 100;
+			roofs.add(new_roof);
+		}
+	}
+	const forceFieldSpawns = map.force_field_spawns;
+	if (forceFieldSpawns) {
+		for (const spawn of forceFieldSpawns) {
+			const graphics = game.add.graphics(spawn[0] + WORLD_PADDING, spawn[1] + WORLD_PADDING);
+			graphics.lineStyle(10, 0x70baff, 1);
+			graphics.drawCircle(0, 0, spawn[2]);
+		}
+	}
+	toggle_t = false;
+	h_pressed = false;
+	state = "game";
+	runAds();
+	if (NUM_GAMES_PLAYED < 0) {
+		showNotification('<p>' + translate("messageServerMove") + '<span style="text-decoration:underline;padding-left:15px;cursor:pointer;" onclick="this.parentNode.style.display = \'none\'">' + translate("okay") + '</span>');
+		NUM_GAMES_PLAYED = Math.abs(NUM_GAMES_PLAYED)
+	}
+	if (window.rdt) { rdt('track', 'ViewContent'); }
+
+	updateLabsVisibility('kdRatio');
+
+	setCameraScale(getCameraScale());
+	setupSound();
+}
+
+function showInitialStartMenu(step) {
+	console.log("Showing menu " + step);
+	if (step == 3) {
+		if (!SERVER_MATCH_DATA.searchable && FLAGS.privateMatchAcknowledged !== true) {
+			document.getElementById("matchInfoMenu").style.display = "block";
+			showScoreboard(false, true);
+			showHelp(false, true);
+			displayShadow(true, true);
+		}
+		else {
+			showInitialStartMenu(2);
+		}
+	}
+	else if (step == 2) {
+		if ((credentials.guest && getStoredData("firstTime") != "f") || (!credentials.guest && credentials.leaderboardComp.timePlayed < 5)) {
+			document.getElementById("matchInfoMenu").style.display = "none";
+			showScoreboard(false, true);
+			showHelp(true, true);
+			document.getElementById("helpMenuButton").style.display = "block";
+		}
+		else {
+			showInitialStartMenu(1);
+		}
+	}
+	else if (step == 1) {
+		document.getElementById("matchInfoMenu").style.display = "none";
+		showHelp(false, true);
+		document.getElementById("helpMenuButton").style.display = "none";
+		hide("signup-promo");
+		hideExperienceBreakdown();
+		showScoreboard(true, true);
+	}
+}
+
+function update_game() {
+	updateClock();
+	tempTime = new Date().getTime();
+	if(FLAGS.lastT){
+		FLAGS.deltaT = tempTime - FLAGS.lastT;
+	}
+	else{
+		FLAGS.deltaT = 1000/60;
+	}
+	FLAGS.lastT = tempTime;
+
+	if (ws.readyState > 1) {
+		throwError("The connection was unexpectedly closed.", true);
+	}
+
+	if (tempTime - lastTime > 15000) {
+		throwError("Connection to the server was lost.", true);
+	}
+
+	if (BULLET_CONTROL === true && weaponSelected == 8 && (tempTime - BULLET_COUNTER) >= Math.floor(1000 / SERVER_MATCH_DATA.match_minigun_rate)) {
+		BULLET_COUNTER = tempTime;
+		if (BULLET_FIRST && !gameEnded && !spectating) {
+			startCameraShake();
+		}
+		BULLET_FIRST = false;
+		fireBullet();
+	}
+
+	// BUG: iceParticles sparkles appear above the players, bullets, hazards, and powerups, aim line, etc.
+	if (ChunkManager.mapIsLoaded) {
+		game.world.bringToTop(ChunkManager.iceParticleGroup);
+		game.world.bringToTop(ChunkManager.mapGroupSecondary);
+		game.world.bringToTop(roofs);
+	}
+	
+	// TODO: Layer ordering: Figure out order, add to groups, bringToTop
+	// SPRITES:
+	// - Bullets
+	// - Background
+	// - Roofs
+	// - Force Fields
+	// - Storm
+	// - Particle effects
+	// - Debris
+	// - Control point
+	// - Control point guide arrows
+	// - Flag Spawn Highlights
+	// - CTF Flags
+	// - CTF guide Arrows
+	// - Snow flakes
+	// - Sniper aim line
+	// - Sniper blast
+	// - Crown
+	// - Crown Arrow
+	// - Hazards
+	// - Mobile Joysticks
+	// - mapGroup: maze walls, ice sprites
+	// - mapGroupSecondary: fences, christmas lights
+	// - iceParticles
+	// - Christmas lights
+	// - Power ups
+	// - Player sprites: tanks, cosmetics, username, etc.
+
+
+	if (!latestUpdate.applied) {
+		var tempUpdate = latestUpdate;
+		updateWorld(tempUpdate);
+		latestUpdate.applied = true;
+	}
+
+	managePlayerItems(tempTime);
+	updatePowerUps(tempTime);
+	updateHazards();
+
+	if (!gameEnded) {
+		clientPredictTanks();
+		clientPredictBullets();
+		updateCrown();
+		updateSniperShot();
+	}
+	else {
+		while (bullets.length != 0) {
+			var test = bullets[0].key.split(" ");
+
+			if (test.length == 1) {
+				var key = "n";
+			}
+			else if (test[1] == "r" || test[1] == "r_dark") {
+				var key = "r";
+			}
+			else {
+				var key = "b"
+			}
+
+			particleExplode("explosion/0/" + key + "/", bullets[0].x, bullets[0].y, {
+				amount: 20,
+				speed: 5,
+				drag: .85,
+				life: 25,
+				scale: .2
+			});
+
+			bullets[0].destroy();
+			bullets.splice(0, 1);
+		}
+	}
+	if (!spectating) {
+		if (!gameEnded && SERVER_MATCH_DATA.match_general_enableSwapTeam) {
+			const swapButton = document.querySelector('#swapButton');
+			if (tempTime - AFK > 5000 && swapButton.style.display == 'none') {
+				swapButton.style.display = 'block';
+			}
+			if (tempTime - AFK < 5000 && swapButton.style.display == 'block') {
+				swapButton.style.display = 'none';
+			}
+		}
+
+		var cX = game.world.pivot.x;
+		var cY = game.world.pivot.y;
+
+		if ((controls.f || controls.rightClick) && weaponSelected == 7 && !tankdisabled && !gameEnded) {
+			if (sniperAim === undefined) {
+				SNIPER_VIEW_TRANSITION = 6;
+				createSniperAim();
+			}
+			var dX = cursorX - (getGameWidth() / 2);
+			var dY = cursorY - (getGameHeight() / 2);
+
+			if (SNIPER_VIEW_TRANSITION > 0) {
+				cX += Math.round(((server_tanks[name].body.x - (getGameWidth() / 2) + dX * CAMERA_MOVEMENT) - cX) * .3);
+				cY += Math.round(((server_tanks[name].body.y - (getGameHeight() / 2) + dY * CAMERA_MOVEMENT) - cY) * .3);
+				SNIPER_VIEW_TRANSITION -= 1;
+			}
+			else {
+				cX = Math.round((server_tanks[name].body.x - (getGameWidth() / 2) + dX * CAMERA_MOVEMENT));
+				cY = Math.round((server_tanks[name].body.y - (getGameHeight() / 2) + dY * CAMERA_MOVEMENT));
+			}
+			updateSniperAim();
+		}
+		else if (tankdisabled) {
+			if (sniperAim !== undefined) {
+				SNIPER_VIEW_TRANSITION = 6;
+				destroySniperAim();
+			}
+			var dX = (server_tanks[name].body.x - (getGameWidth() / 2)) - cX;
+			var dY = (server_tanks[name].body.y - (getGameHeight() / 2)) - cY;
+			cX += dX * 0.05;
+			cY += dY * 0.05;
+		}
+		else {
+			if (sniperAim !== undefined) {
+				SNIPER_VIEW_TRANSITION = 6;
+				destroySniperAim();
+			}
+			if (SNIPER_VIEW_TRANSITION > 0) {
+				cX += Math.round(((server_tanks[name].body.x - (getGameWidth() / 2)) - cX) * .3);
+				cY += Math.round(((server_tanks[name].body.y - (getGameHeight() / 2)) - cY) * .3);
+				SNIPER_VIEW_TRANSITION -= 1;
+			}
+			else {
+				cX = Math.round(server_tanks[name].body.x) - getGameWidth() / 2;
+				cY = Math.round(server_tanks[name].body.y) - getGameHeight() / 2;
+			}
+		}
+		if (cameraShakeOptions.enabled) {
+			cameraShakeOptions.frameCount += cameraShakeOptions.speed;
+			if (cameraShakeOptions.frameCount > cameraShakeOptions.life) {
+				cameraShakeOptions.enabled = false;
+				cameraShakeOptions.frameCount = 0;
+			}
+			else {
+				cX += Math.cos(2 * (cameraShakeOptions.frameCount + random_int(-cameraShakeOptions.jitter, cameraShakeOptions.jitter) / 10)) * (1 - cameraShakeOptions.frameCount / cameraShakeOptions.life) * cameraShakeOptions.amount;
+				cY += Math.sin(1.5 * (cameraShakeOptions.frameCount + random_int(-cameraShakeOptions.jitter, cameraShakeOptions.jitter) / 10)) * (1 - cameraShakeOptions.frameCount / cameraShakeOptions.life) * cameraShakeOptions.amount;
+			}
+		}
+	}
+	else if (!FLAGS.dynamicSpectate) {
+		cX = WORLD_PADDING + map.map[0].length * 50 - getGameWidth() / 2;
+		cY = WORLD_PADDING + map.map.length * 50 - getGameHeight() / 2;
+	}
+	else {
+		var points = dynamicSpectate();
+		cX = points[0];
+		cY = points[1];
+	}
+
+	game.world.pivot.setTo(cX, cY);
+
+	if (ChunkManager.mapIsLoaded) {
+		const rX = game.world.pivot.x + (getGameWidth() / 2);
+		const rY = game.world.pivot.y + (getGameHeight() / 2);
+
+		const TILE_SIZE = 100;
+
+		const rangeX = (getGameWidth() / 2) + TILE_SIZE;
+		const rangeY = (getGameHeight() / 2) + TILE_SIZE;
+
+		ChunkManager.updateChunks();
+		power_ups.forEach(function(sprite) {
+			handleSpriteCulling(sprite, rX, rY, rangeX, rangeY, TILE_SIZE);
+		});
+		roofs.forEach(function(sprite) {
+			handleSpriteCulling(sprite, rX, rY, rangeX, rangeY, TILE_SIZE);
+		});
+		bullets.forEach(function(sprite) {
+			handleSpriteCulling(sprite, rX, rY, rangeX, rangeY, TILE_SIZE);
+		});
+		gameParticleList.forEach(function(sprite) {
+			handleSpriteCulling(sprite, rX, rY, rangeX, rangeY, TILE_SIZE);
+		});
+		for (var i = 0; i < snow.length; i++) {
+			handleSpriteCulling(snow[i], rX, rY, rangeX, rangeY, TILE_SIZE);
+		}
+	}
+
+
+	if (mobileData !== null && mobileData.ui !== undefined) {
+		game.world.bringToTop(mobileData.ui.rightOutside);
+		game.world.bringToTop(mobileData.ui.rightInside);
+		game.world.bringToTop(mobileData.ui.leftOutside);
+		game.world.bringToTop(mobileData.ui.leftInside);
+
+
+		mobileData.ui.rightOutside.x = mobileData.ui.rightInside.x = game.world.pivot.x + mobileData.ui.rightOutside.oX;
+		mobileData.ui.leftOutside.x = mobileData.ui.leftInside.x = game.world.pivot.x + mobileData.ui.leftOutside.oX;
+		mobileData.ui.rightOutside.y = mobileData.ui.rightInside.y = game.world.pivot.y + mobileData.ui.rightOutside.oY;
+		mobileData.ui.leftOutside.y = mobileData.ui.leftInside.y = game.world.pivot.y + mobileData.ui.leftOutside.oY;
+
+		if (mobileData.ui.leftInside.targetAngle !== null) {
+			mobileData.ui.leftInside.x += Math.sin(mobileData.ui.leftInside.targetAngle) * mobileData.ui.leftInside.height;
+			mobileData.ui.leftInside.y -= Math.cos(mobileData.ui.leftInside.targetAngle) * mobileData.ui.leftInside.height;
+		}
+		if (mobileData.ui.rightInside.targetAngle !== null) {
+			if (credentials.dynamicMobile !== false && mobileWeaponAutoshoot.includes(weaponSelected)) {
+				if (tempTime - mobileData.lastShot > 250) {
+					mobileData.lastShot = tempTime;
+					fireBullet();
+				}
+			}
+			mobileData.ui.rightInside.x += Math.sin(mobileData.ui.rightInside.targetAngle) * mobileData.ui.rightInside.height;
+			mobileData.ui.rightInside.y -= Math.cos(mobileData.ui.rightInside.targetAngle) * mobileData.ui.rightInside.height;
+		}
+	}
+
+	if (MODE == "cp") {
+		updateControlPoint();
+	}
+
+	if (MODE == 'ctf') {
+		updateCaptureFlags(latestUpdate.flags);
+	}
+
+	if (SERVER_MATCH_DATA.elimination) {
+		updateStorm();
+	}
+
+	if (tankdisabled == false) {
+		if (!spectating) {
+			send_tank_data();
+			roofs.forEach(function(roof) {
+				if (server_tanks[name].body.x > roof.x - ROOF_RANGE && server_tanks[name].body.x < roof.x + ROOF_RANGE && server_tanks[name].body.y > roof.y - ROOF_RANGE && server_tanks[name].body.y < roof.y + ROOF_RANGE) {
+					roof.targetAlpha = 0.5;
+
+					if (!server_tanks[name].guest) server_tanks[name].text.alpha = 0;
+				}
+				else {
+					roof.targetAlpha = 1;
+				}
+				if (roof.alpha != roof.targetAlpha) {
+					roof.alpha += (roof.targetAlpha - roof.alpha) * 0.25;
+				}
+			})
+
+
+
+		}
+	}
+
+
+}
+
+function joinTeam(team) {
+	setCameraScale(getCameraScale());
+	socket.send("new tank", { team: team });
+	if (MODE == "ffa") {
+		document.getElementById("teamButtonText").innerText = translate("connecting");
+		document.getElementById("teamButtonText").style.fontSize = "3vmin";
+	}
+	else {
+		if (team == "a") {
+			document.getElementById("teamButtonAuto").innerText = translate("connecting");
+		}
+		else if (team == "b") {
+			document.getElementById("teamButtonBlueText").innerText = translate("connecting");
+			document.getElementById("teamButtonBlueText").style.fontSize = "3vmin";
+		}
+		else {
+			document.getElementById("teamButtonRedText").innerText = translate("connecting");
+			document.getElementById("teamButtonRedText").style.fontSize = "3vmin";
+		}
+	}
+	if (MODE == "ffa") {
+		document.getElementById("teamButtonText").innerText = translate("loading");
+		document.getElementById("teamButtonText").style.fontSize = "3vmin";
+	}
+	else {
+		if (team == "a") {
+			document.getElementById("teamButtonAuto").innerText = translate("loading");
+		}
+		else if (team == "b") {
+			document.getElementById("teamButtonBlueText").innerText = translate("loading");
+			document.getElementById("teamButtonBlueText").style.fontSize = "3vmin";
+		}
+		else {
+			document.getElementById("teamButtonRedText").innerText = translate("loading");
+			document.getElementById("teamButtonRedText").style.fontSize = "3vmin";
+		}
+	}
+
+	// If the minimap is enabled, make it visible
+	if (SERVER_MATCH_DATA.match_general_enableMinimap) {
+		minimap.setVisible(true);
+	}
+}
+
+function resetTeamButtons() {
+	// Changes the team buttons to have their default appearance
+	document.getElementById("teamButtonBlueText").innerText = translate("join");
+	document.getElementById("teamButtonRedText").innerText = translate("join");
+	document.getElementById("teamButtonText").innerText = translate("join");
+	document.getElementById("teamButtonAuto").innerText = translate("autoJoin");
+	document.getElementById("teamButtonBlueText").style.fontSize = "5vmin";
+	document.getElementById("teamButtonRedText").style.fontSize = "5vmin";
+	document.getElementById("teamButtonText").style.fontSize = "5vmin";
+}
+
+function finishJoiningTeam() {
+	document.getElementById('weapons').style.display = "block";
+	document.getElementById("teamButtonBlue").style.display = "none";
+	document.getElementById("teamButtonRed").style.display = "none";
+	document.getElementById("teamButtonAuto").style.display = "none";
+	document.getElementById("teamButton").style.display = "none";
+	resetTeamButtons();
+	showScoreboard(false, true);
+	displayShadow(false, true);
+
+	if (!SERVER_MATCH_DATA.searchable) {
+		document.getElementById("teamButtonSpectate").style.display = "block";
+	}
+
+	enableConsole();
+	if (!darkModeEnabled()) {
+		makeIconsLight(false);
+	}
+	updateWeaponUI(false);
+	if (FLAGS.dynamicSpectate) FLAGS.dynamicSpectate = false;
+	if (SERVER_MATCH_DATA.calculated.inWarmup) {
+		flashText("Warmup is in progress, real match will start soon!");
+	}
+	else {
+		flashText(readableModeObjective(MODE));
+	}
+	FLAGS.joined_game = true;
+}
